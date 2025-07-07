@@ -1,0 +1,128 @@
+# Import all necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.preprocessing import StandardScaler, LabelEncoder, PolynomialFeatures
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet, LogisticRegression
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from sklearn.naive_bayes import GaussianNB
+from sklearn.metrics import mean_squared_error, r2_score
+
+# Load the dataset
+train_data = pd.read_csv('train.csv')
+test_data = pd.read_csv('test.csv')
+
+# 1. Data Preprocessing
+def preprocess_data(df):
+    # Handle missing values
+    numerical_cols = df.select_dtypes(include=['int64', 'float64']).columns
+    categorical_cols = df.select_dtypes(include=['object']).columns
+    
+    for col in numerical_cols:
+        df[col].fillna(df[col].median(), inplace=True)
+    for col in categorical_cols:
+        df[col].fillna(df[col].mode()[0], inplace=True)
+    
+    # Feature Engineering
+    df['TotalSF'] = df['TotalBsmtSF'] + df['1stFlrSF'] + df['2ndFlrSF']
+    df['TotalBath'] = df['FullBath'] + 0.5 * df['HalfBath'] + df['BsmtFullBath'] + 0.5 * df['BsmtHalfBath']
+    df['Age'] = df['YrSold'] - df['YearBuilt']
+    df.drop(['Id', 'YearBuilt', 'YrSold', 'MoSold'], axis=1, inplace=True)
+    
+    # Encode categorical variables
+    for col in categorical_cols:
+        if col in df.columns:
+            df[col] = LabelEncoder().fit_transform(df[col])
+    
+    return df
+
+train_data = preprocess_data(train_data)
+test_data = preprocess_data(test_data)
+
+# Log-transform target variable to handle skewness
+train_data['SalePrice'] = np.log1p(train_data['SalePrice'])
+
+# 2. Split Data into Features (X) and Target (y)
+X = train_data.drop('SalePrice', axis=1)
+y = train_data['SalePrice']
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Standardize features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+
+# 3. Model Training & Evaluation
+models = {
+    "Simple Linear Regression": LinearRegression(),
+    "Multiple Linear Regression": LinearRegression(),
+    "Polynomial Regression (deg=2)": LinearRegression(),
+    "Ridge Regression": Ridge(alpha=1.0),
+    "Lasso Regression": Lasso(alpha=0.001),
+    "ElasticNet Regression": ElasticNet(alpha=0.001, l1_ratio=0.5),
+    "k-Nearest Neighbors": KNeighborsRegressor(n_neighbors=5),
+    "Decision Tree": DecisionTreeRegressor(random_state=42),
+    "Random Forest": RandomForestRegressor(random_state=42),
+    "Support Vector Machine": SVR(),
+}
+
+# Special cases (Simple & Polynomial Regression)
+most_correlated_feature = X_train.corrwith(y_train).abs().idxmax()
+X_train_slr = X_train[[most_correlated_feature]]
+X_val_slr = X_val[[most_correlated_feature]]
+
+poly = PolynomialFeatures(degree=2)
+X_train_poly = poly.fit_transform(X_train_scaled)
+X_val_poly = poly.transform(X_val_scaled)
+
+# Evaluate all models
+model_performance = {}
+for name, model in models.items():
+    if name == "Simple Linear Regression":
+        m = model.fit(X_train_slr, y_train)
+        y_pred = m.predict(X_val_slr)
+    elif name == "Polynomial Regression (deg=2)":
+        m = model.fit(X_train_poly, y_train)
+        y_pred = m.predict(X_val_poly)
+    else:
+        m = model.fit(X_train_scaled, y_train)
+        y_pred = m.predict(X_val_scaled)
+    
+    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+    r2 = r2_score(y_val, y_pred)
+    model_performance[name] = {'RMSE': rmse, 'R2': r2}
+    print(f"{name} - RMSE: {rmse:.4f}, R2: {r2:.4f}")
+
+# 4. Hyperparameter Tuning for Best Models
+param_grid_rf = {
+    'n_estimators': [100, 200],
+    'max_depth': [None, 10, 20],
+    'min_samples_split': [2, 5]
+}
+
+grid_rf = GridSearchCV(RandomForestRegressor(random_state=42), param_grid_rf, cv=5, scoring='neg_mean_squared_error')
+grid_rf.fit(X_train_scaled, y_train)
+best_rf = grid_rf.best_estimator_
+y_pred_rf = best_rf.predict(X_val_scaled)
+rmse_rf = np.sqrt(mean_squared_error(y_val, y_pred_rf))
+print(f"\nTuned Random Forest RMSE: {rmse_rf:.4f} (Best Params: {grid_rf.best_params_})")
+
+# 5. Feature Importance Analysis
+feature_importance = best_rf.feature_importances_
+importance_df = pd.DataFrame({'Feature': X.columns, 'Importance': feature_importance}).sort_values('Importance', ascending=False)
+plt.figure(figsize=(10, 6))
+sns.barplot(x='Importance', y='Feature', data=importance_df.head(10))
+plt.title('Top 10 Important Features')
+plt.show()
+
+# 6. Final Predictions on Test Data
+test_data_scaled = scaler.transform(test_data)
+final_predictions = np.expm1(best_rf.predict(test_data_scaled))
+submission = pd.DataFrame({'Id': test_data.index, 'SalePrice': final_predictions})
+submission.to_csv('house_price_predictions.csv', index=False)
+print("\nSubmission file 'house_price_predictions.csv' created successfully!")
